@@ -50,6 +50,7 @@ public class Donate extends AppCompatActivity implements IPictureActivity {
         ArrayAdapter<BasketHelper.Type> adapter = new ArrayAdapter<>(
                 getApplicationContext(),R.layout.list_item,types
         );
+
         autoCompleteTextView = findViewById(R.id.dropDown);
         autoCompleteTextView.setAdapter(adapter);
         //(textField.editText as? AutoCompleteTextView)?.setAdapter(adapter)
@@ -62,8 +63,6 @@ public class Donate extends AppCompatActivity implements IPictureActivity {
             transaction.addToBackStack(null);
             transaction.commit();
         }
-
-
 
     }
 

@@ -4,13 +4,17 @@ import androidx.annotation.NonNull;
 import androidx.annotation.RequiresApi;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
+import androidx.core.app.NotificationCompat;
+import androidx.core.app.NotificationManagerCompat;
 import androidx.core.content.ContextCompat;
 import androidx.core.view.GravityCompat;
 import androidx.drawerlayout.widget.DrawerLayout;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
-import android.app.VoiceInteractor;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.location.Location;
@@ -30,8 +34,21 @@ import android.widget.Button;
 import android.widget.ImageView;
 import android.widget.TextView;
 
+import com.google.android.gms.location.FusedLocationProviderClient;
+import com.google.android.gms.location.LocationCallback;
+import com.google.android.gms.location.LocationRequest;
+import com.google.android.gms.location.LocationResult;
+import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.tasks.OnSuccessListener;
 import com.google.android.material.navigation.NavigationView;
+import com.google.android.material.switchmaterial.SwitchMaterial;
+import com.google.firebase.database.DataSnapshot;
+import com.google.firebase.database.DatabaseError;
+import com.google.firebase.database.DatabaseReference;
+import com.google.firebase.database.FirebaseDatabase;
+import com.google.firebase.database.ValueEventListener;
 import com.polytech.ihm.R;
+import com.polytech.ihm.activities.Basket;
 import com.polytech.ihm.activities.give.Donate;
 import com.polytech.ihm.activities.give.MyList;
 import com.polytech.ihm.activities.give.Request;
@@ -53,10 +70,13 @@ import org.osmdroid.views.overlay.mylocation.MyLocationNewOverlay;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.List;
 import java.util.Random;
 
 public class Demand extends AppCompatActivity implements NavigationView.OnNavigationItemSelectedListener {
     private static final int PERMISSION_REQUEST_CODE = 1;
+    private static final String CHANNEL_1_ID = "ch1";
+    private static final int PERMISSION_FINE_LOCATION = 99;
     private MapView map;
     private LocationManager locationManager;
     private LocationListener locationListener;
@@ -71,7 +91,15 @@ public class Demand extends AppCompatActivity implements NavigationView.OnNaviga
     DrawerLayout drawerLayout;
     NavigationView navigationView;
     Button menuIcon;
-
+    private static final String TAG = "tag";
+    //location variables, google location
+    FusedLocationProviderClient fusedLocationProviderClient;
+    //--Location request is a config file for all the settings related to fusedLocationProviderClient
+    LocationRequest locationRequest;
+    private SwitchMaterial sw_gps;
+    private int notificationId = 1;
+    private LocationCallback locationCallBack;
+    private Marker localisationM;
     @RequiresApi(api = Build.VERSION_CODES.N)
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -82,6 +110,7 @@ public class Demand extends AppCompatActivity implements NavigationView.OnNaviga
                         PreferenceManager.getDefaultSharedPreferences(getApplicationContext())
                 );
         setContentView(R.layout.activity_demand);
+        createNotificationChannel();
         //initialise baskets
         favoriteBaskets = new ArrayList<>();
         reqBaskets = new ArrayList<>();
@@ -96,11 +125,68 @@ public class Demand extends AppCompatActivity implements NavigationView.OnNaviga
         map.setTileSource(TileSourceFactory.MAPNIK); //render
         map.setBuiltInZoomControls(true);            //zoomable
         //should be Localisation
+        //configure location
+        locationRequest = new LocationRequest();
+        locationRequest.setInterval(1000 * 30);
+        locationRequest.setFastestInterval(5000);
+        locationRequest.setPriority(LocationRequest.PRIORITY_BALANCED_POWER_ACCURACY);
+        sw_gps = findViewById(R.id.sw_gps);
+
+        locationCallBack = new LocationCallback() {
+            @Override
+            public void onLocationResult(@NonNull LocationResult locationResult) {
+                super.onLocationResult(locationResult);
+
+                Location location = locationResult.getLastLocation();
+                System.out.println("+++++++++++>> " + location);
+                myLattitude = location.getLatitude();
+                myLongitude = location.getLongitude();
+            }
+        };
+
+        sw_gps.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (sw_gps.isChecked()) {
+                    //Use GPS
+                    locationRequest.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
+                    startLocalisationUpdates();
+                    localisationM = new Marker(map);
+                    localisationM.setPosition(new GeoPoint(myLattitude,myLongitude));
+                    localisationM.setTitle("my current location");
+                    localisationM.setDraggable(false);
+                    localisationM.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
+                    localisationM.setIcon(getResources().getDrawable(R.drawable.osm_ic_follow_me));
+
+                    map.getOverlayManager().add(localisationM);
+
+                    localisationM.setOnMarkerClickListener(new Marker.OnMarkerClickListener() {
+                        @Override
+                        public boolean onMarkerClick(Marker marker, MapView mapView) {
+                            if (localisationM.isInfoWindowShown())
+                                localisationM.closeInfoWindow();
+                            else {
+                                localisationM.showInfoWindow();
+                            }
+                            return true;
+                        }
+                    });
+                } else {
+                    // using Towers + wifi
+                    locationRequest.setPriority(LocationRequest.PRIORITY_BALANCED_POWER_ACCURACY);
+                    stopLocalisationUpdates();
+                    map.getOverlays().remove(localisationM);
+                }
+            }
+        });
+        updateGPS();
+        //--demo 43.675050, 7.058324
+
         GeoPoint startPoint = new GeoPoint(43.675050, 7.058324);
         IMapController mapController = map.getController();
         mapController.setZoom(14.0);
         mapController.setCenter(startPoint);
-        //setLocalisation();
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             generateMarkers();
         }
@@ -109,28 +195,54 @@ public class Demand extends AppCompatActivity implements NavigationView.OnNaviga
         //navigation Drawer
         navifationDrawer();
     }
+
+    private void stopLocalisationUpdates() {
+        fusedLocationProviderClient.removeLocationUpdates(locationCallBack);
+    }
+
+    private void startLocalisationUpdates() {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            // TODO: Consider calling
+            //    ActivityCompat#requestPermissions
+            // here to request the missing permissions, and then overriding
+            //   public void onRequestPermissionsResult(int requestCode, String[] permissions,
+            //                                          int[] grantResults)
+            // to handle the case where the user grants the permission. See the documentation
+            // for ActivityCompat#requestPermissions for more details.
+            return;
+        }
+        fusedLocationProviderClient.requestLocationUpdates(locationRequest, locationCallBack, null);
+        updateGPS();
+    }
+
     //markers
     @RequiresApi(api = Build.VERSION_CODES.N)
     private void generateMarkers() {
         markers = new ArrayList<>();
-        for(int i=0;i<20;i++){
+        for (int i = 0; i < 20; i++) {
             addMarker(
-                    new BasketHelper(generateTitle(),generateDescription(),generateWeight(),generatePNumber(),generateType(),generateGeoPoint(),generatePicture())
+                    new BasketHelper(generateTitle(), generateDescription(), generateWeight(), generatePNumber(), generateType(), generateGeoPoint(), generatePicture())
             );
-
         }
     }
+
     private int generatePicture() {
         Random rand = new Random();
-        switch(rand.nextInt(5)){
-            case 0: return R.drawable.image1;
-            case 1: return R.drawable.image2;
-            case 2: return R.drawable.image3;
-            case 3: return R.drawable.image4;
-            case 4: return R.drawable.image5;
+        switch (rand.nextInt(5)) {
+            case 0:
+                return R.drawable.image1;
+            case 1:
+                return R.drawable.image2;
+            case 2:
+                return R.drawable.image3;
+            case 3:
+                return R.drawable.image4;
+            case 4:
+                return R.drawable.image5;
         }
         return R.drawable.image1;
     }
+
     @RequiresApi(api = Build.VERSION_CODES.N)
     private String generateDescription() {
         int leftLimit = 48; // numeral '0'
@@ -147,15 +259,18 @@ public class Demand extends AppCompatActivity implements NavigationView.OnNaviga
         //Util.print(getApplicationContext(),generatedString);
         return generatedString;
     }
+
     private float generateWeight() {
         return new Random().nextInt(100);
     }
+
     @RequiresApi(api = Build.VERSION_CODES.N)
     private String generatePNumber() {
-        return "06"+(10000000 + new Random().nextInt(90000000));
+        return "06" + (10000000 + new Random().nextInt(90000000));
     }
+
     private BasketHelper.Type generateType() {
-        switch(new Random().nextInt(4)){
+        switch (new Random().nextInt(4)) {
             case 0:
                 return BasketHelper.Type.HONEYCOOB;
             case 1:
@@ -167,10 +282,12 @@ public class Demand extends AppCompatActivity implements NavigationView.OnNaviga
         }
         return BasketHelper.Type.HONEYCOOB;
     }
+
     private GeoPoint generateGeoPoint() {
         Random rand = new Random();
-        return new GeoPoint(rand.nextDouble()*0.1 + 43.6,rand.nextDouble()*0.1 +7);
+        return new GeoPoint(rand.nextDouble() * 0.1 + 43.6, rand.nextDouble() * 0.1 + 7);
     }
+
     @RequiresApi(api = Build.VERSION_CODES.N)
     private String generateTitle() {
         int leftLimit = 48; // numeral '0'
@@ -187,14 +304,22 @@ public class Demand extends AppCompatActivity implements NavigationView.OnNaviga
         //Util.print(getApplicationContext(),"title:"+generatedString);
         return generatedString;
     }
+
     @SuppressLint("UseCompatLoadingForDrawables")
     private Marker addMarker(BasketHelper basketHelper) {
+        // Write a message to the database
+        FirebaseDatabase database = FirebaseDatabase.getInstance();
+        DatabaseReference myRef = database.getReference();
+        myRef.child("basket").child(basketHelper.getPhoneNumber()).setValue(basketHelper);
+
+
+        markers.add(basketHelper);
         Marker m = new Marker((map));
         m.setPosition(basketHelper.getMyGeoPoint());
         m.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
         m.setIcon(getResources().getDrawable(R.drawable.icons8_trolley_100));
         m.setDraggable(false);
-        m.setInfoWindow(new MapCustomInfoBubble(map,basketHelper));
+        m.setInfoWindow(new MapCustomInfoBubble(map, basketHelper));
         m.setInfoWindowAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_TOP);
 
         map.getOverlayManager().add(m);
@@ -213,8 +338,6 @@ public class Demand extends AppCompatActivity implements NavigationView.OnNaviga
         return m;
 
     }
-
-
 
     //Menu
     private void navifationDrawer() {
@@ -235,9 +358,9 @@ public class Demand extends AppCompatActivity implements NavigationView.OnNaviga
             }
         });
     }
+
     @Override
     public boolean onNavigationItemSelected(@NonNull MenuItem item) {
-
         switch (item.getItemId()) {
             case R.id.demand:
                 drawerLayout.closeDrawer(GravityCompat.START);
@@ -249,6 +372,40 @@ public class Demand extends AppCompatActivity implements NavigationView.OnNaviga
                 break;
             case R.id.favorite:
                 Intent intentFavorite = new Intent(this, Favorite.class);
+                FirebaseDatabase database = FirebaseDatabase.getInstance();
+                DatabaseReference myRef = database.getReference("favoriteBasket");
+                // Read from the database
+                myRef.addValueEventListener(new ValueEventListener() {
+                    @Override
+                    public void onDataChange(DataSnapshot dataSnapshot) {
+                        // This method is called once with the initial value and again
+                        // whenever data at this location is updated.
+                        int length = 10;
+                        for (DataSnapshot dataSnapshot1 : dataSnapshot.getChildren()) {
+                            //System.out.println(dataSnapshot.getChildren().iterator().next());
+                            //(String title, String description, float weight, String phoneNumber, Type type,GeoPoint myGeoPoint,int picture)
+                            favoriteBaskets.add(
+                                    new BasketHelper(
+                                            dataSnapshot1.child("title").getValue(String.class),
+                                            dataSnapshot1.child("description").getValue(String.class),
+                                            dataSnapshot1.child("weight").getValue(Integer.class),
+                                            dataSnapshot1.getKey(),
+                                            dataSnapshot1.child("type").getValue(BasketHelper.Type.class),
+                                            new GeoPoint(dataSnapshot1.child("myGeoPoint").child("latitude").getValue(Double.class), dataSnapshot1.child("myGeoPoint").child("longitude").getValue(Double.class)),
+                                            dataSnapshot1.child("picture").getValue(Integer.class)
+                                    )
+                            );
+                            System.out.println(favoriteBaskets.size());
+                        }
+                        Log.d(TAG, "Value is: ");
+                    }
+
+                    @Override
+                    public void onCancelled(DatabaseError error) {
+                        // Failed to read value
+                        Log.w(TAG, "Failed to read value.", error.toException());
+                    }
+                });
                 intentFavorite.putParcelableArrayListExtra(Extra.basketFList, favoriteBaskets);
                 startActivity(intentFavorite);
                 break;
@@ -274,13 +431,13 @@ public class Demand extends AppCompatActivity implements NavigationView.OnNaviga
         return true;
     }
 
-
     //Map lifeCycle
     @Override
     protected void onPause() {
         super.onPause();
         map.onPause();
     }
+
     @Override
     protected void onResume() {
         super.onResume();
@@ -288,11 +445,12 @@ public class Demand extends AppCompatActivity implements NavigationView.OnNaviga
     }
 
 
-    //
+    //voir profile.xml
     public void toProfile(View view) {
         Intent intentProfile = new Intent(this, com.polytech.ihm.activities.Profile.class);
         startActivity(intentProfile);
     }
+
     public void makeCall(String phoneNumber) {
         Intent intent = new Intent(Intent.ACTION_CALL);
         intent.setData(Uri.parse("tel:" + phoneNumber));
@@ -307,62 +465,6 @@ public class Demand extends AppCompatActivity implements NavigationView.OnNaviga
         }
     }
 
-    // Localisation
-    @RequiresApi(api = Build.VERSION_CODES.M)
-    private void setLocalisation() {
-        //copier_coller
-        locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
-        locationListener = new LocationListener() {
-            @Override
-            public void onLocationChanged(Location location) {
-                myLongitude = location.getLongitude();
-                myLattitude = location.getLatitude();
-                //textView.append("\n " + longitude + " " + lattitude);
-                mLocationOverlay = new MyLocationNewOverlay(new GpsMyLocationProvider(getApplicationContext()), map);
-                mLocationOverlay.enableMyLocation();
-                map.setMultiTouchControls(true);
-                map.getOverlays().add(mLocationOverlay);
-            }
-
-            @Override
-            public void onStatusChanged(String provider, int status, Bundle extras) {
-            }
-
-            @Override
-            public void onProviderEnabled(String provider) {
-            }
-
-            @Override
-            public void onProviderDisabled(String provider) {
-                Intent i = new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS);
-                startActivity(i);
-            }
-        };
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{
-                    Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION,
-                    Manifest.permission.INTERNET}, 10);
-            return;
-        }
-        /*
-        locationManager.requestLocationUpdates("gps", 5000, 5, locationListener);
-        Polyline line = new Polyline();
-        line.setTitle("Un trajet");
-        line.setSubDescription(Polyline.class.getCanonicalName());
-        line.setWidth(10f);
-        line.setId("-1");
-        line.setColor(Color.RED);
-        trajet = new ArrayList<GeoPoint>();
-        OverlayItem point = new OverlayItem("dechet_organique", "moyen", new GeoPoint(45.31765771762817, 5.922782763890293));
-        trajet.add(new GeoPoint(point.getPoint().getLatitude(), point.getPoint().getLongitude()));
-        line.setPoints(trajet);
-        line.setGeodesic(true);
-        line.setInfoWindow(new BasicInfoWindow(R.layout.bonuspack_bubble, map));
-        map.getOverlayManager().add(line);
-        map.invalidate();
-        */
-        //fin
-    }
     private void requestPermission() {
 
         if (ActivityCompat.shouldShowRequestPermissionRationale(Demand.this, Manifest.permission.CALL_PHONE)) {
@@ -371,6 +473,7 @@ public class Demand extends AppCompatActivity implements NavigationView.OnNaviga
             ActivityCompat.requestPermissions(Demand.this, new String[]{Manifest.permission.CALL_PHONE}, PERMISSION_REQUEST_CODE);
         }
     }
+
     @Override
     public void onRequestPermissionsResult(int requestCode, String permissions[], int[] grantResults) {
         switch (requestCode) {
@@ -379,15 +482,46 @@ public class Demand extends AppCompatActivity implements NavigationView.OnNaviga
                     makeCall(null);
                 }
                 break;
+            case PERMISSION_FINE_LOCATION:
+                if (grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                    updateGPS();
+                } else {
+                    Util.print(getApplicationContext(), "this app require permission to be granted in order to work properly");
+                    finish();
+                }
+                break;
+        }
+    }
+
+    //set location all the stuff you need is here
+    //step 1: add implementation 'com.google.android.gms:play-services-location:18.0.0' to gradle dependencies
+    //step 2: code
+    private void updateGPS() {
+        fusedLocationProviderClient = LocationServices.getFusedLocationProviderClient(Demand.this);
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+            //the user provided the permission
+            fusedLocationProviderClient.getLastLocation().addOnSuccessListener(this, new OnSuccessListener<Location>() {
+                @Override
+                public void onSuccess(Location location) {
+                    //we got the permissions. Put the values of location. XXX into the UI component
+                    System.out.println("myLocalisation ------------> "+location);
+
+                }
+            });
+        } else {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, PERMISSION_FINE_LOCATION);
+            }
         }
     }
 
     //costume the marker
     class MapCustomInfoBubble extends InfoWindow {
         private BasketHelper basketHelper;
-        public MapCustomInfoBubble(MapView mapView,BasketHelper basketHelper) {
+
+        public MapCustomInfoBubble(MapView mapView, BasketHelper basketHelper) {
             super(R.layout.map_infobubble_black, mapView);//my custom layout and my mapView
-            this.basketHelper=basketHelper;
+            this.basketHelper = basketHelper;
         }
 
         @Override
@@ -409,10 +543,10 @@ public class Demand extends AppCompatActivity implements NavigationView.OnNaviga
             ImageView call = (ImageView) mView.findViewById(R.id.bubble_call);
             Button request = (Button) mView.findViewById(R.id.request);
 
-            title.setText("title: "+basketHelper.getTitle());
-            desc.setText("description: "+basketHelper.getDescription());
-            weight.setText("weight: "+basketHelper.getWeight());
-            type.setText("type :"+basketHelper.getType());
+            title.setText("title: " + basketHelper.getTitle());
+            desc.setText("description: " + basketHelper.getDescription());
+            weight.setText("weight: " + basketHelper.getWeight());
+            type.setText("type :" + basketHelper.getType());
 
             call.setOnClickListener(new View.OnClickListener() {
 
@@ -460,10 +594,53 @@ public class Demand extends AppCompatActivity implements NavigationView.OnNaviga
                     //Util.print(getApplicationContext(),"request clicked");
                     reqBaskets.add(basketHelper);
                     v.setEnabled(false);
+                    //add notification to the
+                    addNotification();
                 }
             });
+
         }
 
     }
+
+    private void addNotification() {
+
+        Intent intent = new Intent(this, Demand.class);
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, intent, 0);
+
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_1_ID)
+                .setSmallIcon(R.drawable.avatar)
+                .setContentTitle("New request ! ")
+                .setContentText("A request has been sent, please check your request list")
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setContentIntent(pendingIntent)
+                .setAutoCancel(true);
+
+        NotificationManagerCompat notificationManager = NotificationManagerCompat.from(this);
+
+// notificationId is a unique int for each notification that you must define
+        notificationManager.notify(notificationId, builder.build());
+
+        notificationId++;
+
+    }
+
+    private void createNotificationChannel() {
+        // Create the NotificationChannel, but only on API 26+ because
+        // the NotificationChannel class is new and not in the support library
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            CharSequence name = ("Channel_1");
+            String description = ("Channel_1_description");
+            int importance = NotificationManager.IMPORTANCE_DEFAULT;
+            NotificationChannel channel = new NotificationChannel(CHANNEL_1_ID, name, importance);
+            channel.setDescription(description);
+            // Register the channel with the system; you can't change the importance
+            // or other notification behaviors after this
+            NotificationManager notificationManager = getSystemService(NotificationManager.class);
+            notificationManager.createNotificationChannel(channel);
+        }
+    }
+
 
 }
